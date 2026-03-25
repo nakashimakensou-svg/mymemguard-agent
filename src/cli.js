@@ -107,7 +107,7 @@ function pickRelevantFiles(allFiles, message) {
 
 // ─── Gemini direct call ───────────────────────────────────────────────────────
 
-const GEMINI_URL = (key) => `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-04-17:generateContent?key=${key}`
+const GEMINI_URL = (key) => `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`
 
 async function callGemini(geminiKey, systemPrompt, history, message) {
   const contents = [
