@@ -158,7 +158,11 @@ async function callGeminiWithTools(geminiKey, systemPrompt, history, message, cw
 
   // 最大5ラウンドのツール呼び出しループ
   for (let round = 0; round < 5; round++) {
-    const body = { system_instruction: { parts: [{ text: systemPrompt }] }, contents, tools, generationConfig: { temperature: 0.3, maxOutputTokens: 8192 } }
+    const isLastTurn = contents[contents.length - 1]?.parts?.some(p => p.functionResponse)
+    const toolConfig = isLastTurn
+      ? { function_calling_config: { mode: 'AUTO' } }
+      : { function_calling_config: { mode: 'ANY' } }
+    const body = { system_instruction: { parts: [{ text: systemPrompt }] }, contents, tools, tool_config: toolConfig, generationConfig: { temperature: 0.3, maxOutputTokens: 8192 } }
     const data = await apiFetch(GEMINI_URL(geminiKey), 'POST', body, null)
     if (data.error) throw new Error(`Gemini error: ${data.error.message}`)
 
