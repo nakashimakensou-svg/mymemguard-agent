@@ -278,9 +278,13 @@ OS: Windows (cmd.exe)
 ${treeText}
 ${fileContext ? '\n【関連ファイル】\n' + fileContext : ''}
 
-ファイル操作・コマンド実行が必要な場合は迷わずツールを呼び出してください。
-Windowsパスに括弧()やスペースがある場合はダブルクォートで囲むこと。
-確認を求めず即実行してください。`
+【絶対ルール】
+- ファイル操作・確認・コマンド実行は必ずツールを呼び出して実際に実行する。
+- 過去の会話履歴に同様の操作があっても、毎回ツールを呼び出して実行・確認する。
+- 「削除しました」「確認しました」などの報告は、ツールで実際に実行した後にのみ言う。
+- 実行せずにテキストだけで報告することは絶対禁止。
+- Windowsパスに括弧()やスペースがある場合はダブルクォートで囲む。
+- 操作後は必ずlist_dirまたはfile_treeで結果を確認する。`
 
   console.log(`   🤖 Gemini Function Calling 開始...`)
   const response = await callGeminiWithTools(cfg.geminiKey, systemPrompt, history, message, cwd)
