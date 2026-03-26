@@ -196,6 +196,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
 
   let streamLog = '🤖 Claude 起動中...'
   await postStream(cfg, commandId, streamLog)
+  let accumulatedText = '' // テキストを全ラウンドで蓄積
 
   for (let round = 0; round < 15; round++) {
     let data
@@ -221,8 +222,13 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
     const toolUses = data.content?.filter(b => b.type === 'tool_use') || []
     const textBlocks = data.content?.filter(b => b.type === 'text') || []
 
+    // テキストを蓄積（ツール呼び出しと同時に返ってくる場合も捨てない）
+    if (textBlocks.length > 0) {
+      accumulatedText = textBlocks.map(b => b.text).join('')
+    }
+
     if (data.stop_reason === 'end_turn' || toolUses.length === 0) {
-      const answer = textBlocks.map(b => b.text).join('') || '（応答なし）'
+      const answer = accumulatedText || '（応答なし）'
       await postStream(cfg, commandId, streamLog + '\n✅ 回答生成完了')
       return answer
     }
@@ -463,8 +469,9 @@ OS: Windows (cmd.exe)
 【トップレベルのファイル/フォルダ】
 ${topLevelText}
 ${savedCtx ? `
-【前回のコンテキスト（参考）】
+【前回のコンテキスト — これを参照して答えること】
 ${savedCtx.summary}
+※「前回」「覚えてる？」などの質問は、このコンテキストだけで答える。ファイルを読みに行かないこと。
 ` : ''}
 【ルール】
 - 必要な情報はlist_dir・read_fileツールで自分で取得する。
