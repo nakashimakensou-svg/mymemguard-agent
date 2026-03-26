@@ -347,35 +347,24 @@ async function handleChat(payload, cfg) {
   const cwd = payload.cwd || process.cwd()
   const { message, history = [] } = payload
 
-  console.log(`   📂 プロジェクトスキャン中: ${cwd}`)
+  console.log(`   📂 作業ディレクトリ: ${cwd}`)
 
-  // ファイルツリー取得
-  const tree = buildTree(cwd, 0, 5)
-  const treeText = treeToText(tree)
-
-  // 関連ファイル収集（操作系コマンドはファイル内容不要）
-  const isOpCmd = /削除|delete|remove|rmdir|mkdir|作成|移動|move|rename/.test(message)
-  const allFiles = isOpCmd ? [] : collectFiles(cwd, 100_000)
-  const relevant = isOpCmd ? [] : pickRelevantFiles(allFiles, message)
-  const fileContext = relevant.length > 0
-    ? relevant.map(f => `\`\`\`\n// ${f.path}\n${f.content}\n\`\`\``).join('\n\n')
-    : ''
+  // トップレベルのみ渡す（深いツリーはClaudeが自分でlist_dirで探索する）
+  const topLevel = handleListDir({ path: cwd })
+  const topLevelText = topLevel.entries.map(e => `${e.type === 'dir' ? '📁' : '📄'} ${e.name}`).join('\n')
 
   const systemPrompt = `あなたはローカルPCに直接接続されたAIエンジニアアシスタントです。
 作業ディレクトリ: ${cwd}
 OS: Windows (cmd.exe)
 
-【プロジェクト構成】
-${treeText}
-${fileContext ? '\n【関連ファイル】\n' + fileContext : ''}
+【トップレベルのファイル/フォルダ】
+${topLevelText}
 
-【絶対ルール】
-- ファイル操作・確認・コマンド実行は必ずツールを呼び出して実際に実行する。
-- 過去の会話履歴に同様の操作があっても、毎回ツールを呼び出して実行・確認する。
-- 「削除しました」「確認しました」などの報告は、ツールで実際に実行した後にのみ言う。
-- 実行せずにテキストだけで報告することは絶対禁止。
+【ルール】
+- 必要な情報はlist_dir・read_fileツールで自分で取得する。
+- ファイル操作は必ずexec_commandで実行し、実行後にlist_dirで確認する。
 - Windowsパスに括弧()やスペースがある場合はダブルクォートで囲む。
-- 操作後は必ずlist_dirまたはfile_treeで結果を確認する。`
+- テキストだけで「実行しました」と報告せず、必ずツールで実行してから報告する。`
 
   const model = payload.model || 'haiku'
   let response
