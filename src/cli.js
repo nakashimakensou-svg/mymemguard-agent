@@ -70,39 +70,69 @@ function treeToText(nodes, prefix = '') {
   }).join('\n')
 }
 
-function collectFiles(dir, maxBytes = 200_000, exts = ['.ts', '.tsx', '.js', '.jsx', '.json', '.md', '.py', '.go', '.rs']) {
-  const result = []
-  let total = 0
-  function walk(d) {
-    let entries
-    try { entries = fs.readdirSync(d, { withFileTypes: true }) } catch { return }
-    for (const e of entries) {
-      if (IGNORE.includes(e.name) || e.name.startsWith('.')) continue
-      const full = path.join(d, e.name)
-      if (e.isDirectory()) { walk(full); continue }
-      if (!exts.some(x => e.name.endsWith(x))) continue
-      const stat = fs.statSync(full)
-      if (stat.size > 50_000 || total + stat.size > maxBytes) continue
-      try {
-        const content = fs.readFileSync(full, 'utf8')
-        result.push({ path: path.relative(dir, full), content })
-        total += stat.size
-      } catch { /* skip binary */ }
-    }
-  }
-  walk(dir)
-  return result
+// ─── Context persistence ──────────────────────────────────────────────────────
+
+function getContextFile(cwd) {
+  const hash = require('crypto').createHash('md5').update(cwd).digest('hex').slice(0, 8)
+  return path.join(CONFIG_DIR, `context-${hash}.json`)
 }
 
-function pickRelevantFiles(allFiles, message) {
-  const words = message.toLowerCase().split(/\s+/)
-  return allFiles
-    .map(f => {
-      const score = words.reduce((s, w) => s + (f.path.toLowerCase().includes(w) ? 3 : 0) + (f.content.toLowerCase().includes(w) ? 1 : 0), 0)
-      return { ...f, score }
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 20)
+function loadProjectContext(cwd) {
+  try {
+    const data = JSON.parse(fs.readFileSync(getContextFile(cwd), 'utf8'))
+    if (data.cwd === cwd) return data
+  } catch { /* no context yet */ }
+  return null
+}
+
+function saveProjectContext(cwd, summary) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true })
+  fs.writeFileSync(getContextFile(cwd), JSON.stringify({ cwd, summary, updatedAt: new Date().toISOString() }, null, 2))
+}
+
+// ─── Stream helpers ───────────────────────────────────────────────────────────
+
+async function postStream(cfg, commandId, streamLog) {
+  if (!commandId) return
+  try {
+    await apiFetch(`${cfg.url}/api/agent/stream`, 'POST', { command_id: commandId, stream_log: streamLog }, cfg.token)
+  } catch { /* ignore stream errors — not critical */ }
+}
+
+async function postConfirmPrompt(cfg, commandId, confirmPrompt, streamLog) {
+  if (!commandId) return
+  try {
+    await apiFetch(`${cfg.url}/api/agent/stream`, 'POST', { command_id: commandId, confirm_prompt: confirmPrompt, stream_log: streamLog }, cfg.token)
+  } catch { /* ignore */ }
+}
+
+// Agent polls for user's confirm_response
+async function waitForConfirmation(cfg, commandId, command) {
+  if (!commandId) return true
+  const prompt = `⚠️ 危険な操作の確認:\n\`${command}\`\n\nこのコマンドを実行してもよいですか？`
+  console.log(`   ⚠️  確認が必要: ${command}`)
+  await postConfirmPrompt(cfg, commandId, prompt, `⏳ ユーザーの確認待ち...\n実行予定: ${command}`)
+
+  for (let i = 0; i < 60; i++) {
+    await new Promise(r => setTimeout(r, 1000))
+    try {
+      const { default: fetch } = await import('node-fetch')
+      const res = await fetch(`${cfg.url}/api/agent/stream?id=${commandId}`, {
+        headers: { Authorization: `Bearer ${cfg.token}` },
+      })
+      const data = await res.json()
+      if (data.confirm_response === 'approved') {
+        console.log(`   ✅ ユーザーが承認`)
+        return true
+      }
+      if (data.confirm_response === 'rejected') {
+        console.log(`   ❌ ユーザーが拒否`)
+        return false
+      }
+    } catch { /* retry */ }
+  }
+  console.log(`   ⏱ タイムアウト — キャンセル`)
+  return false
 }
 
 // ─── Gemini direct call ───────────────────────────────────────────────────────
@@ -139,14 +169,35 @@ const CLAUDE_TOOLS = [
   },
 ]
 
-async function callClaudeWithTools(anthropicKey, systemPrompt, history, message, model, cwd) {
+// Dangerous command patterns that require user confirmation
+const DANGEROUS_PATTERNS = [
+  /\brm\s+-rf?\b/i,
+  /\brmdir\s+\/s\b/i,
+  /\bdel\s+\/[sf]\b/i,
+  /\bformat\b/i,
+  /\bdrop\s+(table|database|schema)\b/i,
+  /\btruncate\s+table\b/i,
+  /\bdelete\s+from\b/i,
+  /\bgit\s+reset\s+--hard\b/i,
+  /\bgit\s+clean\s+-[a-z]*f/i,
+  /\bgit\s+push\s+.*--force\b/i,
+]
+
+function isDangerous(command) {
+  return DANGEROUS_PATTERNS.some(p => p.test(command))
+}
+
+async function callClaudeWithTools(anthropicKey, systemPrompt, history, message, model, cwd, cfg, commandId) {
   const { default: fetch } = await import('node-fetch')
   const messages = [
     ...history.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })),
     { role: 'user', content: message },
   ]
 
-  for (let round = 0; round < 8; round++) {
+  let streamLog = '🤖 Claude 起動中...'
+  await postStream(cfg, commandId, streamLog)
+
+  for (let round = 0; round < 15; round++) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
@@ -159,21 +210,40 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
     const textBlocks = data.content?.filter(b => b.type === 'text') || []
 
     if (data.stop_reason === 'end_turn' || toolUses.length === 0) {
-      return textBlocks.map(b => b.text).join('') || '（応答なし）'
+      const answer = textBlocks.map(b => b.text).join('') || '（応答なし）'
+      await postStream(cfg, commandId, streamLog + '\n✅ 回答生成完了')
+      return answer
     }
 
-    // ツール実行
+    // ─── Execute tool calls IN PARALLEL (feature 5) ──────────────────────────
     messages.push({ role: 'assistant', content: data.content })
-    const toolResults = []
 
-    for (const block of toolUses) {
+    const toolNames = toolUses.map(b => `${b.name}(${JSON.stringify(b.input).slice(0, 60)})`).join(', ')
+    streamLog += `\n🔧 [Round ${round + 1}] ${toolNames}`
+    console.log(`   🔧 並列実行: ${toolNames}`)
+    await postStream(cfg, commandId, streamLog)
+
+    const toolResults = await Promise.all(toolUses.map(async (block) => {
       const { name, input, id } = block
-      console.log(`   🔧 ${name}(${JSON.stringify(input).slice(0, 80)})`)
       let result
       try {
         if (name === 'exec_command') {
+          // ─── Safety confirmation (feature 2) ───────────────────────────────
+          if (isDangerous(input.command)) {
+            const approved = await waitForConfirmation(cfg, commandId, input.command)
+            if (!approved) {
+              result = '❌ ユーザーがこの操作をキャンセルしました'
+              return { type: 'tool_result', tool_use_id: id, content: result }
+            }
+            // Clear confirm_prompt after resolution
+            await postStream(cfg, commandId, streamLog + '\n▶️ 承認済み — 実行中...')
+          }
           const r = handleExec({ command: input.command, cwd })
           result = `exit:${r.exitCode}\nstdout: ${r.stdout}\n${r.stderr ? 'stderr: ' + r.stderr : ''}`.trim()
+          // ─── Error auto-recovery hint (feature 4) ─────────────────────────
+          if (r.exitCode !== 0) {
+            result += '\n\n[HINT: コマンドが失敗しました。エラー内容を分析して、修正コマンドを実行してください。]'
+          }
         } else if (name === 'read_file') {
           const r = handleReadFile({ path: path.resolve(cwd, input.path) })
           result = r.content || r.error
@@ -184,13 +254,18 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
           const r = handleListDir({ path: path.resolve(cwd, input.path) })
           result = r.entries.map(e => `${e.type === 'dir' ? '📁' : '📄'} ${e.name}`).join('\n')
         }
-        console.log(`   ✓ 完了`)
       } catch (e) {
         result = `エラー: ${e.message}`
-        console.log(`   ❌ ${e.message}`)
+        console.log(`   ❌ ${name}: ${e.message}`)
       }
-      toolResults.push({ type: 'tool_result', tool_use_id: id, content: String(result) })
-    }
+      return { type: 'tool_result', tool_use_id: id, content: String(result) }
+    }))
+
+    const doneNames = toolUses.map(b => b.name).join(', ')
+    streamLog += ` ✓`
+    console.log(`   ✓ 完了: ${doneNames}`)
+    await postStream(cfg, commandId, streamLog)
+
     messages.push({ role: 'user', content: toolResults })
   }
   return '（最大ラウンド数に達しました）'
@@ -243,7 +318,6 @@ async function callGeminiWithTools(geminiKey, systemPrompt, history, message, cw
     { role: 'user', parts: [{ text: message }] },
   ]
 
-  // 最大5ラウンドのツール呼び出しループ
   for (let round = 0; round < 5; round++) {
     const isLastTurn = contents[contents.length - 1]?.parts?.some(p => p.functionResponse)
     const toolConfig = isLastTurn
@@ -260,12 +334,10 @@ async function callGeminiWithTools(geminiKey, systemPrompt, history, message, cw
     const toolCalls = parts.filter(p => p.functionCall)
     const textParts = parts.filter(p => p.text)
 
-    // ツール呼び出しがなければ最終回答
     if (toolCalls.length === 0) {
       return textParts.map(p => p.text).join('') || '（応答なし）'
     }
 
-    // ツール実行
     contents.push({ role: 'model', parts })
     const toolResults = []
 
@@ -341,15 +413,17 @@ function handleListDir(payload) {
   return { path: dir, entries: fs.readdirSync(dir, { withFileTypes: true }).map(e => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' })) }
 }
 
-async function handleChat(payload, cfg) {
-  if (!cfg.geminiKey) return { error: 'Gemini APIキーが設定されていません。設定ファイルを削除して再セットアップしてください。' }
+async function handleChat(payload, cfg, commandId) {
+  if (!cfg.geminiKey && !cfg.anthropicKey) return { error: 'APIキーが設定されていません。' }
 
   const cwd = payload.cwd || process.cwd()
   const { message, history = [] } = payload
 
   console.log(`   📂 作業ディレクトリ: ${cwd}`)
 
-  // トップレベルのみ渡す（深いツリーはClaudeが自分でlist_dirで探索する）
+  // ─── Context persistence (feature 3) ──────────────────────────────────────
+  const savedCtx = loadProjectContext(cwd)
+
   const topLevel = handleListDir({ path: cwd })
   const topLevelText = topLevel.entries.map(e => `${e.type === 'dir' ? '📁' : '📄'} ${e.name}`).join('\n')
 
@@ -359,24 +433,42 @@ OS: Windows (cmd.exe)
 
 【トップレベルのファイル/フォルダ】
 ${topLevelText}
-
+${savedCtx ? `
+【前回のコンテキスト（参考）】
+${savedCtx.summary}
+` : ''}
 【ルール】
 - 必要な情報はlist_dir・read_fileツールで自分で取得する。
 - ファイル操作は必ずexec_commandで実行し、実行後にlist_dirで確認する。
 - Windowsパスに括弧()やスペースがある場合はダブルクォートで囲む。
-- テキストだけで「実行しました」と報告せず、必ずツールで実行してから報告する。`
+- テキストだけで「実行しました」と報告せず、必ずツールで実行してから報告する。
+
+【エラー自動修復ルール】
+- コマンドがエラー(exit!=0)を返したら、原因を分析して修正コマンドを実行し、再試行する。
+- "not found"はPATHの問題 → フルパスで実行するか、npmのグローバルパスを確認する。
+- ENOENT/ENOSPCはパス・権限の問題 → ディレクトリ確認してから実行する。
+- 3回修正しても失敗したらユーザーに状況を報告する。`
 
   const model = payload.model || 'haiku'
   let response
   if (cfg.anthropicKey) {
     console.log(`   🤖 Claude ${model} 開始...`)
-    response = await callClaudeWithTools(cfg.anthropicKey, systemPrompt, history, message, model, cwd)
+    response = await callClaudeWithTools(cfg.anthropicKey, systemPrompt, history, message, model, cwd, cfg, commandId)
   } else if (cfg.geminiKey) {
     console.log(`   🤖 Gemini Function Calling 開始...`)
     response = await callGeminiWithTools(cfg.geminiKey, systemPrompt, history, message, cwd)
   } else {
     return { error: 'APIキーが設定されていません' }
   }
+
+  // ─── Save project context after each chat ─────────────────────────────────
+  try {
+    const contextSummary = `最後の作業: ${new Date().toLocaleString('ja-JP')}
+ユーザーの質問: ${message.slice(0, 200)}
+AIの回答要約: ${response.slice(0, 500)}`
+    saveProjectContext(cwd, contextSummary)
+  } catch { /* ignore */ }
+
   console.log(`   ✓ 回答生成完了 (${response.length}文字)`)
   return { response }
 }
@@ -388,7 +480,7 @@ async function dispatch(cmd, cfg) {
     case 'exec':       return handleExec(cmd.payload)
     case 'file_tree':  return handleFileTree(cmd.payload)
     case 'list_dir':   return handleListDir(cmd.payload)
-    case 'chat':       return await handleChat(cmd.payload, cfg)
+    case 'chat':       return await handleChat(cmd.payload, cfg, cmd.id)
     default:           return { error: `Unknown command: ${cmd.type}` }
   }
 }
