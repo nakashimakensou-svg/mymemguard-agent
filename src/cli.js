@@ -186,7 +186,16 @@ const DANGEROUS_PATTERNS = [
   /\bri\s+.*-r/i,
 ]
 
+// ビルドキャッシュ・一時フォルダは削除しても安全
+const SAFE_DELETE_PATTERNS = [
+  /rmdir.*\\\.next\b/i,
+  /rmdir.*\/\.next\b/i,
+  /rmdir.*(\\|\/)(dist|build|out|coverage|\.turbo|\.cache)\b/i,
+  /Remove-Item.*(\.next|dist|build|out|coverage)\b/i,
+]
+
 function isDangerous(command) {
+  if (SAFE_DELETE_PATTERNS.some(p => p.test(command))) return false
   return DANGEROUS_PATTERNS.some(p => p.test(command))
 }
 
