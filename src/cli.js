@@ -198,12 +198,24 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
   await postStream(cfg, commandId, streamLog)
 
   for (let round = 0; round < 15; round++) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: CLAUDE_MODELS[model] || CLAUDE_MODELS.haiku, max_tokens: 8192, system: systemPrompt, tools: CLAUDE_TOOLS, messages }),
-    })
-    const data = await res.json()
+    let data
+    for (let retry = 0; retry < 3; retry++) {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: CLAUDE_MODELS[model] || CLAUDE_MODELS.haiku, max_tokens: 4096, system: systemPrompt, tools: CLAUDE_TOOLS, messages }),
+      })
+      data = await res.json()
+      if (data.error?.type === 'rate_limit_error') {
+        const wait = (retry + 1) * 20000 // 20s, 40s, 60s
+        console.log(`   ⏳ レート制限 — ${wait / 1000}秒待機して再試行...`)
+        streamLog += `\n⏳ レート制限 — ${wait / 1000}秒待機中...`
+        await postStream(cfg, commandId, streamLog)
+        await new Promise(r => setTimeout(r, wait))
+        continue
+      }
+      break
+    }
     if (data.error) throw new Error(`Claude error: ${data.error.message}`)
 
     const toolUses = data.content?.filter(b => b.type === 'tool_use') || []
@@ -246,7 +258,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
           const r = handleReadFile({ path: path.resolve(cwd, input.path) })
           // Truncate large files to avoid token overflow
           const content = r.content || r.error || ''
-          result = content.length > 6000 ? content.slice(0, 6000) + '\n... (省略)' : content
+          result = content.length > 3000 ? content.slice(0, 3000) + '\n... (省略)' : content
         } else if (name === 'write_file') {
           const r = handleWriteFile({ path: path.resolve(cwd, input.path), content: input.content })
           result = r.ok ? '✓ 書き込み完了' : r.error
@@ -276,6 +288,14 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
     await postStream(cfg, commandId, streamLog)
 
     messages.push({ role: 'user', content: toolResults })
+
+    // ─── Prune old tool rounds to prevent token accumulation ─────────────────
+    // Keep: first user message + last 6 messages (3 rounds)
+    const firstMsg = messages[0]
+    if (messages.length > 7) {
+      messages.splice(1, messages.length - 7)
+      messages[0] = firstMsg
+    }
   }
   return '（最大ラウンド数に達しました）'
 }
