@@ -181,6 +181,9 @@ const DANGEROUS_PATTERNS = [
   /\bgit\s+reset\s+--hard\b/i,
   /\bgit\s+clean\s+-[a-z]*f/i,
   /\bgit\s+push\s+.*--force\b/i,
+  /Remove-Item\s+.*-Recurse/i,
+  /Remove-Item\s+.*-Force/i,
+  /\bri\s+.*-r/i,
 ]
 
 function isDangerous(command) {
@@ -250,7 +253,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
           if (isDangerous(input.command)) {
             const approved = await waitForConfirmation(cfg, commandId, input.command)
             if (!approved) {
-              result = '❌ ユーザーがこの操作をキャンセルしました'
+              result = '❌ ユーザーがこの操作を明示的に拒否しました。同じ目的の別コマンドを試みることも禁止されています。ユーザーに拒否された旨を報告して処理を終了してください。'
               return { type: 'tool_result', tool_use_id: id, content: result }
             }
             await postStream(cfg, commandId, streamLog + '\n▶️ 承認済み — 実行中...')
