@@ -210,7 +210,8 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
   await postStream(cfg, commandId, streamLog)
   let accumulatedText = '' // テキストを全ラウンドで蓄積
 
-  for (let round = 0; round < 15; round++) {
+  const maxRounds = (CLAUDE_MODELS[model] === CLAUDE_MODELS.sonnet) ? 25 : 15
+  for (let round = 0; round < maxRounds; round++) {
     let data
     for (let retry = 0; retry < 3; retry++) {
       const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -315,7 +316,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
       messages[0] = firstMsg
     }
   }
-  return '（最大ラウンド数に達しました）'
+  return accumulatedText || '（最大ラウンド数に達しました — エラーが複雑なため途中で終了しました）'
 }
 
 async function callGemini(geminiKey, systemPrompt, history, message) {
