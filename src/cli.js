@@ -410,6 +410,26 @@ async function callGeminiWithTools(geminiKey, systemPrompt, history, message, cw
   return '（最大ラウンド数に達しました）'
 }
 
+// ─── Quality check ────────────────────────────────────────────────────────────
+
+function isQuestionBack(response) {
+  if (!response || response.length < 10) return false
+  const questionPatterns = [
+    /どれ(をしたい|にしますか|ですか)/,
+    /以下のいずれか/,
+    /何をしましょうか/,
+    /どちらですか/,
+    /どういう意図/,
+    /具体的に教えて/,
+    /確認させてください/,
+    /意図を教えてください/,
+  ]
+  const questionCount = (response.match(/？/g) || []).length
+  const hasPattern = questionPatterns.some(p => p.test(response))
+  // 質問が3つ以上 OR 質問返しパターンに一致
+  return questionCount >= 3 || hasPattern
+}
+
 // ─── Command handlers ─────────────────────────────────────────────────────────
 
 function handleReadFile(payload) {
@@ -495,6 +515,14 @@ ${savedCtx.summary}
   if (cfg.anthropicKey) {
     console.log(`   🤖 Claude ${model} 開始...`)
     response = await callClaudeWithTools(cfg.anthropicKey, systemPrompt, history, message, model, cwd, cfg, commandId)
+
+    // Haikuが質問返しをした場合、Sonnetに自動切り替え
+    if (model === 'haiku' && isQuestionBack(response)) {
+      console.log(`   🔄 Haikuが質問返し → Sonnetに自動切り替え`)
+      await postStream(cfg, commandId, '⚡ Haikuでは対応困難 → 🧠 Sonnetに切り替えています...')
+      const sonnetResponse = await callClaudeWithTools(cfg.anthropicKey, systemPrompt, history, message, 'sonnet', cwd, cfg, commandId)
+      response = `> ⚡ Haikuでは回答困難だったため、自動的に🧠 Sonnetに切り替えました。\n\n${sonnetResponse}`
+    }
   } else if (cfg.geminiKey) {
     console.log(`   🤖 Gemini Function Calling 開始...`)
     response = await callGeminiWithTools(cfg.geminiKey, systemPrompt, history, message, cwd)
