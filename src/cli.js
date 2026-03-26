@@ -109,6 +109,93 @@ function pickRelevantFiles(allFiles, message) {
 
 const GEMINI_URL = (key) => `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`
 
+// ─── Claude API (tool use) ────────────────────────────────────────────────────
+
+const CLAUDE_MODELS = {
+  haiku:  'claude-haiku-4-5-20251001',
+  sonnet: 'claude-sonnet-4-6',
+}
+
+const CLAUDE_TOOLS = [
+  {
+    name: 'exec_command',
+    description: 'Windowsのcmd.exeでシェルコマンドを実行する。ファイル削除・作成・ビルドなどに使う。括弧やスペースを含むパスはダブルクォートで囲む。',
+    input_schema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }
+  },
+  {
+    name: 'read_file',
+    description: 'ファイルの内容を読む',
+    input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }
+  },
+  {
+    name: 'write_file',
+    description: 'ファイルを書き込む（作成・上書き）',
+    input_schema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] }
+  },
+  {
+    name: 'list_dir',
+    description: 'ディレクトリの中身一覧を取得',
+    input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }
+  },
+]
+
+async function callClaudeWithTools(anthropicKey, systemPrompt, history, message, model, cwd) {
+  const { default: fetch } = await import('node-fetch')
+  const messages = [
+    ...history.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })),
+    { role: 'user', content: message },
+  ]
+
+  for (let round = 0; round < 8; round++) {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODELS[model] || CLAUDE_MODELS.haiku, max_tokens: 8192, system: systemPrompt, tools: CLAUDE_TOOLS, messages }),
+    })
+    const data = await res.json()
+    if (data.error) throw new Error(`Claude error: ${data.error.message}`)
+
+    const toolUses = data.content?.filter(b => b.type === 'tool_use') || []
+    const textBlocks = data.content?.filter(b => b.type === 'text') || []
+
+    if (data.stop_reason === 'end_turn' || toolUses.length === 0) {
+      return textBlocks.map(b => b.text).join('') || '（応答なし）'
+    }
+
+    // ツール実行
+    messages.push({ role: 'assistant', content: data.content })
+    const toolResults = []
+
+    for (const block of toolUses) {
+      const { name, input, id } = block
+      console.log(`   🔧 ${name}(${JSON.stringify(input).slice(0, 80)})`)
+      let result
+      try {
+        if (name === 'exec_command') {
+          const r = handleExec({ command: input.command, cwd })
+          result = `exit:${r.exitCode}\nstdout: ${r.stdout}\n${r.stderr ? 'stderr: ' + r.stderr : ''}`.trim()
+        } else if (name === 'read_file') {
+          const r = handleReadFile({ path: path.resolve(cwd, input.path) })
+          result = r.content || r.error
+        } else if (name === 'write_file') {
+          const r = handleWriteFile({ path: path.resolve(cwd, input.path), content: input.content })
+          result = r.ok ? '✓ 書き込み完了' : r.error
+        } else if (name === 'list_dir') {
+          const r = handleListDir({ path: path.resolve(cwd, input.path) })
+          result = r.entries.map(e => `${e.type === 'dir' ? '📁' : '📄'} ${e.name}`).join('\n')
+        }
+        console.log(`   ✓ 完了`)
+      } catch (e) {
+        result = `エラー: ${e.message}`
+        console.log(`   ❌ ${e.message}`)
+      }
+      toolResults.push({ type: 'tool_result', tool_use_id: id, content: String(result) })
+    }
+    messages.push({ role: 'user', content: toolResults })
+  }
+  return '（最大ラウンド数に達しました）'
+}
+
 async function callGemini(geminiKey, systemPrompt, history, message) {
   const contents = [
     ...history.map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.content }] })),
@@ -290,8 +377,17 @@ ${fileContext ? '\n【関連ファイル】\n' + fileContext : ''}
 - Windowsパスに括弧()やスペースがある場合はダブルクォートで囲む。
 - 操作後は必ずlist_dirまたはfile_treeで結果を確認する。`
 
-  console.log(`   🤖 Gemini Function Calling 開始...`)
-  const response = await callGeminiWithTools(cfg.geminiKey, systemPrompt, history, message, cwd)
+  const model = payload.model || 'haiku'
+  let response
+  if (cfg.anthropicKey) {
+    console.log(`   🤖 Claude ${model} 開始...`)
+    response = await callClaudeWithTools(cfg.anthropicKey, systemPrompt, history, message, model, cwd)
+  } else if (cfg.geminiKey) {
+    console.log(`   🤖 Gemini Function Calling 開始...`)
+    response = await callGeminiWithTools(cfg.geminiKey, systemPrompt, history, message, cwd)
+  } else {
+    return { error: 'APIキーが設定されていません' }
+  }
   console.log(`   ✓ 回答生成完了 (${response.length}文字)`)
   return { response }
 }
@@ -318,7 +414,7 @@ async function mainLoop(cfg) {
   console.log(`\n✅ MyMemGuard Agent 起動中`)
   console.log(`   接続先: ${cfg.url}`)
   console.log(`   作業ディレクトリ: ${process.cwd()}`)
-  console.log(`   Gemini直接呼び出し: ${cfg.geminiKey ? '✓ 有効' : '✗ 無効（クラウド経由）'}`)
+  console.log(`   AIエンジン: ${cfg.anthropicKey ? '✓ Claude (Haiku/Sonnet)' : cfg.geminiKey ? '✓ Gemini' : '✗ 未設定'}`)
   console.log(`   Ctrl+C で停止\n`)
 
   while (true) {
@@ -364,8 +460,9 @@ async function main() {
     console.log('🧠 MyMemGuard Agent セットアップ\n')
     const url = await ask('MyMemGuardのURL (例: https://mymemguard.vercel.app): ')
     const token = await ask('APIトークン (MyMemGuardの設定画面でコピー): ')
+    const anthropicKey = await ask('Anthropic APIキー (sk-ant-... / なければEnterでスキップ): ')
     const geminiKey = await ask('Gemini APIキー (なければEnterでスキップ): ')
-    cfg = { url: url.replace(/\/$/, ''), token, geminiKey: geminiKey || null }
+    cfg = { url: url.replace(/\/$/, ''), token, anthropicKey: anthropicKey || null, geminiKey: geminiKey || null }
 
     try {
       const res = await apiFetch(`${cfg.url}/api/agent/ping`, 'POST', { cwd: process.cwd() }, cfg.token)
