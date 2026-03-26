@@ -215,7 +215,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
       return answer
     }
 
-    // ─── Execute tool calls IN PARALLEL (feature 5) ──────────────────────────
+    // ─── Execute tool calls IN PARALLEL (max 4 at a time to avoid rate limits) ─
     messages.push({ role: 'assistant', content: data.content })
 
     const toolNames = toolUses.map(b => `${b.name}(${JSON.stringify(b.input).slice(0, 60)})`).join(', ')
@@ -223,7 +223,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
     console.log(`   🔧 並列実行: ${toolNames}`)
     await postStream(cfg, commandId, streamLog)
 
-    const toolResults = await Promise.all(toolUses.map(async (block) => {
+    async function executeTool(block) {
       const { name, input, id } = block
       let result
       try {
@@ -235,18 +235,18 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
               result = '❌ ユーザーがこの操作をキャンセルしました'
               return { type: 'tool_result', tool_use_id: id, content: result }
             }
-            // Clear confirm_prompt after resolution
             await postStream(cfg, commandId, streamLog + '\n▶️ 承認済み — 実行中...')
           }
           const r = handleExec({ command: input.command, cwd })
-          result = `exit:${r.exitCode}\nstdout: ${r.stdout}\n${r.stderr ? 'stderr: ' + r.stderr : ''}`.trim()
-          // ─── Error auto-recovery hint (feature 4) ─────────────────────────
+          result = `exit:${r.exitCode}\nstdout: ${r.stdout.slice(0, 4000)}\n${r.stderr ? 'stderr: ' + r.stderr.slice(0, 2000) : ''}`.trim()
           if (r.exitCode !== 0) {
             result += '\n\n[HINT: コマンドが失敗しました。エラー内容を分析して、修正コマンドを実行してください。]'
           }
         } else if (name === 'read_file') {
           const r = handleReadFile({ path: path.resolve(cwd, input.path) })
-          result = r.content || r.error
+          // Truncate large files to avoid token overflow
+          const content = r.content || r.error || ''
+          result = content.length > 6000 ? content.slice(0, 6000) + '\n... (省略)' : content
         } else if (name === 'write_file') {
           const r = handleWriteFile({ path: path.resolve(cwd, input.path), content: input.content })
           result = r.ok ? '✓ 書き込み完了' : r.error
@@ -259,7 +259,16 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
         console.log(`   ❌ ${name}: ${e.message}`)
       }
       return { type: 'tool_result', tool_use_id: id, content: String(result) }
-    }))
+    }
+
+    // Chunk parallel execution to max 4 at a time
+    const PARALLEL_LIMIT = 4
+    const toolResults = []
+    for (let j = 0; j < toolUses.length; j += PARALLEL_LIMIT) {
+      const chunk = toolUses.slice(j, j + PARALLEL_LIMIT)
+      const chunkResults = await Promise.all(chunk.map(executeTool))
+      toolResults.push(...chunkResults)
+    }
 
     const doneNames = toolUses.map(b => b.name).join(', ')
     streamLog += ` ✓`
