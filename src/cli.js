@@ -303,6 +303,13 @@ function isDangerous(command) {
   return DANGEROUS_PATTERNS.some(p => p.test(command))
 }
 
+async function reportAgentTokens(cfg, tokens) {
+  if (!cfg?.url || !cfg?.token || Object.keys(tokens).length === 0) return
+  try {
+    await apiFetch(`${cfg.url}/api/usage/agent-tokens`, 'POST', { tokens }, cfg.token)
+  } catch { /* non-critical */ }
+}
+
 async function callClaudeWithTools(anthropicKey, systemPrompt, history, message, model, cwd, cfg, commandId, onRoundComplete) {
   const { default: fetch } = await import('node-fetch')
   const messages = [
@@ -313,6 +320,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
   let streamLog = '🤖 Claude 起動中...'
   await postStream(cfg, commandId, streamLog)
   let accumulatedText = '' // テキストを全ラウンドで蓄積
+  const agentTokens = {} // 今回のセッション累計トークン
 
   const maxRounds = (CLAUDE_MODELS[model] === CLAUDE_MODELS.sonnet) ? 25 : 15
   for (let round = 0; round < maxRounds; round++) {
@@ -336,6 +344,15 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
     }
     if (data.error) throw new Error(`Claude error: ${data.error.message}`)
 
+    // トークン累計
+    if (data.usage) {
+      const m = CLAUDE_MODELS[model] || CLAUDE_MODELS.haiku
+      agentTokens[m] = {
+        in:  (agentTokens[m]?.in  ?? 0) + (data.usage.input_tokens  ?? 0),
+        out: (agentTokens[m]?.out ?? 0) + (data.usage.output_tokens ?? 0),
+      }
+    }
+
     const toolUses = data.content?.filter(b => b.type === 'tool_use') || []
     const textBlocks = data.content?.filter(b => b.type === 'text') || []
 
@@ -347,6 +364,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
     if (data.stop_reason === 'end_turn' || toolUses.length === 0) {
       const answer = accumulatedText || '（応答なし）'
       await postStream(cfg, commandId, streamLog + '\n✅ 回答生成完了')
+      reportAgentTokens(cfg, agentTokens).catch(() => {})
       return answer
     }
 
@@ -453,6 +471,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
       messages.push({ role: 'user', content: summaryPrefix + firstContent }, ...tail)
     }
   }
+  reportAgentTokens(cfg, agentTokens).catch(() => {})
   return accumulatedText || '（最大ラウンド数に達しました — エラーが複雑なため途中で終了しました）'
 }
 
@@ -472,7 +491,7 @@ async function callGemini(geminiKey, systemPrompt, history, message) {
 }
 
 // Gemini Function Calling でツールを使いながら会話するエージェントループ
-async function callGeminiWithTools(geminiKey, systemPrompt, history, message, cwd) {
+async function callGeminiWithTools(geminiKey, systemPrompt, history, message, cwd, cfg) {
   const tools = [{
     functionDeclarations: [
       {
@@ -522,6 +541,7 @@ async function callGeminiWithTools(geminiKey, systemPrompt, history, message, cw
     ...history.map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.content }] })),
     { role: 'user', parts: [{ text: message }] },
   ]
+  const agentTokens = {}
 
   for (let round = 0; round < 5; round++) {
     const isLastTurn = contents[contents.length - 1]?.parts?.some(p => p.functionResponse)
@@ -540,7 +560,18 @@ async function callGeminiWithTools(geminiKey, systemPrompt, history, message, cw
     const textParts = parts.filter(p => p.text)
 
     if (toolCalls.length === 0) {
+      reportAgentTokens(cfg, agentTokens).catch(() => {})
       return textParts.map(p => p.text).join('') || '（応答なし）'
+    }
+
+    // Geminiトークン累計（usageMetadata）
+    const um = data.usageMetadata
+    if (um) {
+      const gModel = 'gemini-2.5-flash'
+      agentTokens[gModel] = {
+        in:  (agentTokens[gModel]?.in  ?? 0) + (um.promptTokenCount     ?? 0),
+        out: (agentTokens[gModel]?.out ?? 0) + (um.candidatesTokenCount ?? 0),
+      }
     }
 
     contents.push({ role: 'model', parts })
@@ -595,6 +626,7 @@ async function callGeminiWithTools(geminiKey, systemPrompt, history, message, cw
 
     contents.push({ role: 'user', parts: toolResults })
   }
+  reportAgentTokens(cfg, agentTokens).catch(() => {})
   return '（最大ラウンド数に達しました）'
 }
 
@@ -1217,7 +1249,7 @@ ${phase.plan || ''}
     }
   } else if (cfg.geminiKey) {
     console.log(`   🤖 Gemini Function Calling 開始...`)
-    response = await callGeminiWithTools(cfg.geminiKey, systemPrompt, history, message, cwd)
+    response = await callGeminiWithTools(cfg.geminiKey, systemPrompt, history, message, cwd, cfg)
   } else {
     return { error: 'APIキーが設定されていません' }
   }
