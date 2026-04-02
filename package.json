@@ -1,6 +1,6 @@
 {
   "name": "mymemguard-agent",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Local agent for MyMemGuard — gives the browser app full file system and terminal access",
   "bin": {
     "mymemguard-agent": "./src/cli.js"
