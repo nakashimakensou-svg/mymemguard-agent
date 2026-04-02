@@ -620,7 +620,7 @@ function isQuestionBack(response) {
 
 // ─── Command handlers ─────────────────────────────────────────────────────────
 
-const READ_CHUNK_SIZE = 6000  // 1チャンクあたりの文字数
+const READ_CHUNK_SIZE = 20000  // 1チャンクあたりの文字数
 
 function handleReadFile(payload) {
   const filePath = path.resolve(payload.path)
