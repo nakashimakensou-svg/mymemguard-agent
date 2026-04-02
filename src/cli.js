@@ -163,9 +163,9 @@ async function postConfirmPrompt(cfg, commandId, confirmPrompt, streamLog) {
 // Agent polls for user's confirm_response
 async function waitForConfirmation(cfg, commandId, command) {
   if (!commandId) return true
-  const prompt = `⚠️ 危険な操作の確認:\n\`${command}\`\n\nこのコマンドを実行してもよいですか？`
-  console.log(`   ⚠️  確認が必要: ${command}`)
-  await postConfirmPrompt(cfg, commandId, prompt, `⏳ ユーザーの確認待ち...\n実行予定: ${command}`)
+  const prompt = `⚠️ Dangerous command:\n\`${command}\`\n\nAllow execution?`
+  console.log(`   ⚠️  Confirmation required: ${command}`)
+  await postConfirmPrompt(cfg, commandId, prompt, `⏳ Waiting for user confirmation...\nPending: ${command}`)
 
   for (let i = 0; i < 60; i++) {
     await new Promise(r => setTimeout(r, 1000))
@@ -176,16 +176,16 @@ async function waitForConfirmation(cfg, commandId, command) {
       })
       const data = await res.json()
       if (data.confirm_response === 'approved') {
-        console.log(`   ✅ ユーザーが承認`)
+        console.log(`   ✅ User approved`)
         return true
       }
       if (data.confirm_response === 'rejected') {
-        console.log(`   ❌ ユーザーが拒否`)
+        console.log(`   ❌ User denied`)
         return false
       }
     } catch { /* retry */ }
   }
-  console.log(`   ⏱ タイムアウト — キャンセル`)
+  console.log(`   ⏱ Timeout — cancelled`)
   return false
 }
 
@@ -334,7 +334,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
       data = await res.json()
       if (data.error?.type === 'rate_limit_error') {
         const wait = (retry + 1) * 20000 // 20s, 40s, 60s
-        console.log(`   ⏳ レート制限 — ${wait / 1000}秒待機して再試行...`)
+        console.log(`   ⏳ Rate limit — retrying in ${wait / 1000}s...`)
         streamLog += `\n⏳ レート制限 — ${wait / 1000}秒待機中...`
         await postStream(cfg, commandId, streamLog)
         await new Promise(r => setTimeout(r, wait))
@@ -373,7 +373,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
 
     const toolNames = toolUses.map(b => `${b.name}(${JSON.stringify(b.input).slice(0, 60)})`).join(', ')
     streamLog += `\n🔧 [Round ${round + 1}] ${toolNames}`
-    console.log(`   🔧 並列実行: ${toolNames}`)
+    console.log(`   🔧 Parallel exec: ${toolNames}`)
     await postStream(cfg, commandId, streamLog)
 
     async function executeTool(block) {
@@ -444,7 +444,7 @@ async function callClaudeWithTools(anthropicKey, systemPrompt, history, message,
 
     const doneNames = toolUses.map(b => b.name).join(', ')
     streamLog += ` ✓`
-    console.log(`   ✓ 完了: ${doneNames}`)
+    console.log(`   ✓ Done: ${doneNames}`)
     await postStream(cfg, commandId, streamLog)
 
     // ジャーナルに記録
@@ -616,7 +616,7 @@ async function callGeminiWithTools(geminiKey, systemPrompt, history, message, cw
         } else if (name === 'web_search') {
           result = await handleWebSearch(args)
         }
-        console.log(`   ✓ 完了`)
+        console.log(`   ✓ Done`)
       } catch (e) {
         result = `エラー: ${e.message}`
         console.log(`   ❌ ${e.message}`)
@@ -1081,7 +1081,7 @@ async function handleChat(payload, cfg, commandId) {
   const cwd = payload.cwd || process.cwd()
   const { message, history = [] } = payload
 
-  console.log(`   📂 作業ディレクトリ: ${cwd}`)
+  console.log(`   📂 Working directory: ${cwd}`)
 
   // ─── Context persistence (feature 3) ──────────────────────────────────────
   const savedCtx = loadProjectContext(cwd)
@@ -1156,7 +1156,7 @@ ${savedCtx.summary}
 
     // ─── Phase 4: 確認済み → 実行 ────────────────────────────────────────────
     if (phase?.current === 'awaiting_confirmation' && isConfirmation(message)) {
-      console.log(`   🚀 Phase 4: 実行フェーズ開始`)
+      console.log(`   🚀 Phase 4: Executing...`)
       savePhase(cwd, { current: 'execution', workJournal: [] })
 
       const journal = getJournal(cwd)
@@ -1184,7 +1184,7 @@ ${journalText}`
 
     // ─── 実行中の継続（途中で止まった場合） ──────────────────────────────────
     } else if (phase?.current === 'execution') {
-      console.log(`   🔄 実行継続中...`)
+      console.log(`   🔄 Continuing execution...`)
       const journal = getJournal(cwd)
       const journalText = journal.slice(-30).join('\n')
 
@@ -1206,7 +1206,7 @@ ${phase.plan || ''}
 
     // ─── Phase 1→2: 大きなタスク → 探索→計画 ─────────────────────────────────
     } else if (isLargeTask(message) && !phase) {
-      console.log(`   🔍 大きなタスク検出 → Phase 1: 探索開始`)
+      console.log(`   🔍 Large task detected → Phase 1: Exploring...`)
       savePhase(cwd, { current: 'exploration', originalMessage: message })
 
       // Phase 1: 探索
@@ -1223,7 +1223,7 @@ ${phase.plan || ''}
       // 実行中以外でフェーズが残っていたらリセット
       if (phase && !isConfirmation(message)) clearPhase(cwd)
 
-      console.log(`   🤖 Claude ${model} 開始...`)
+      console.log(`   🤖 Claude ${model} starting...`)
 
       // 作業ジャーナルをシステムプロンプトに注入
       const journal = getJournal(cwd)
@@ -1238,7 +1238,7 @@ ${phase.plan || ''}
 
       // Haikuが質問返しをした場合、Sonnetに自動切り替え
       if (model === 'haiku' && isQuestionBack(response)) {
-        console.log(`   🔄 Haikuが質問返し → Sonnetに自動切り替え`)
+        console.log(`   🔄 Haiku returned question → switching to Sonnet`)
         await postStream(cfg, commandId, '⚡ Haikuでは対応困難 → 🧠 Sonnetに切り替えています...')
         const sonnetResponse = await callClaudeWithTools(
           cfg.anthropicKey, systemPrompt + journalInjection, history, message, 'sonnet', cwd, cfg, commandId,
@@ -1248,7 +1248,7 @@ ${phase.plan || ''}
       }
     }
   } else if (cfg.geminiKey) {
-    console.log(`   🤖 Gemini Function Calling 開始...`)
+    console.log(`   🤖 Gemini Function Calling starting...`)
     response = await callGeminiWithTools(cfg.geminiKey, systemPrompt, history, message, cwd, cfg)
   } else {
     return { error: 'APIキーが設定されていません' }
@@ -1262,7 +1262,7 @@ AIの回答要約: ${response.slice(0, 500)}`
     saveProjectContext(cwd, contextSummary)
   } catch { /* ignore */ }
 
-  console.log(`   ✓ 回答生成完了 (${response.length}文字)`)
+  console.log(`   ✓ Response generated (${response.length} chars)`)
   return { response }
 }
 
@@ -1289,17 +1289,36 @@ const PING_INTERVAL = 30000
 
 async function mainLoop(cfg) {
   let lastPing = 0
-  console.log(`\n✅ MyMemGuard Agent 起動中`)
-  console.log(`   接続先: ${cfg.url}`)
-  console.log(`   作業ディレクトリ: ${process.cwd()}`)
-  console.log(`   AIエンジン: ${cfg.anthropicKey ? '✓ Claude (Haiku/Sonnet)' : cfg.geminiKey ? '✓ Gemini' : '✗ 未設定'}`)
-  console.log(`   Ctrl+C で停止\n`)
+  console.log(`\n✅ MyMemGuard Agent started`)
+  console.log(`   Server: ${cfg.url}`)
+  console.log(`   CWD: ${process.cwd()}`)
+  console.log(`   AI: ${cfg.anthropicKey ? '✓ Claude (Haiku/Sonnet)' : cfg.geminiKey ? '✓ Gemini' : '✗ Not configured'}`)
+  console.log(`   Ctrl+C to stop\n`)
 
   while (true) {
     try {
       if (Date.now() - lastPing > PING_INTERVAL) {
-        await apiFetch(`${cfg.url}/api/agent/ping`, 'POST', { cwd: process.cwd() }, cfg.token)
+        const pingRes = await apiFetch(`${cfg.url}/api/agent/ping`, 'POST', { cwd: process.cwd() }, cfg.token)
         lastPing = Date.now()
+
+        if (pingRes?.stop_requested) {
+          console.log('\n🛑 Stop requested. Shutting down...')
+          process.exit(0)
+        }
+
+        if (pingRes?.restart_requested) {
+          console.log('\n🔄 Update & restart requested...')
+          console.log('   Running npm install -g mymemguard-agent@latest...')
+          try {
+            const { execSync } = require('child_process')
+            execSync('npm install -g mymemguard-agent@latest', { stdio: 'inherit' })
+            console.log('✅ Update complete! Restarting...\n')
+          } catch (e) {
+            console.error('⚠️ Update failed:', e.message)
+            console.log('   Please run manually: npm install -g mymemguard-agent@latest')
+          }
+          process.exit(0)
+        }
       }
 
       const { commands } = await apiFetch(`${cfg.url}/api/agent/poll`, 'GET', null, cfg.token)
@@ -1319,10 +1338,10 @@ async function mainLoop(cfg) {
           result,
           error,
         }, cfg.token)
-        console.log(`   ${error ? '❌ ' + error : '✓ 完了'}`)
+        console.log(`   ${error ? '❌ ' + error : '✓ Done'}`)
       }
     } catch (e) {
-      console.error(`接続エラー: ${e.message} — 再試行中...`)
+      console.error(`Connection error: ${e.message} — retrying...`)
     }
 
     await new Promise(r => setTimeout(r, POLL_INTERVAL))
@@ -1335,7 +1354,7 @@ async function main() {
   let cfg = loadConfig()
 
   if (!cfg) {
-    console.log('🧠 MyMemGuard Agent セットアップ\n')
+    console.log('🧠 MyMemGuard Agent Setup\n')
     const url = await ask('MyMemGuardのURL (例: https://mymemguard.vercel.app): ')
     const token = await ask('APIトークン (MyMemGuardの設定画面でコピー): ')
     const anthropicKey = await ask('Anthropic APIキー (sk-ant-... / なければEnterでスキップ): ')
@@ -1346,13 +1365,13 @@ async function main() {
       const res = await apiFetch(`${cfg.url}/api/agent/ping`, 'POST', { cwd: process.cwd() }, cfg.token)
       if (res.ok) {
         saveConfig(cfg)
-        console.log('\n✅ 接続成功！設定を保存しました\n')
+        console.log('\n✅ Connected! Config saved.\n')
       } else {
-        console.error('❌ 接続失敗。URLとトークンを確認してください')
+        console.error('❌ Connection failed. Check URL and token.')
         process.exit(1)
       }
     } catch (e) {
-      console.error(`❌ 接続エラー: ${e.message}`)
+      console.error(`❌ Connection error: ${e.message}`)
       process.exit(1)
     }
   }
