@@ -1353,6 +1353,34 @@ async function mainLoop(cfg) {
 async function main() {
   let cfg = loadConfig()
 
+  // コマンドライン引数からURL/Tokenを取得（ワンライナー対応）
+  const args = process.argv.slice(2)
+  const argUrl = args.find((_, i) => args[i - 1] === '--url')
+  const argToken = args.find((_, i) => args[i - 1] === '--token')
+
+  if (argUrl && argToken) {
+    cfg = {
+      url: argUrl.replace(/\/$/, ''),
+      token: argToken,
+      anthropicKey: args.find((_, i) => args[i - 1] === '--anthropic-key') || null,
+      geminiKey: args.find((_, i) => args[i - 1] === '--gemini-key') || null,
+    }
+    try {
+      const res = await apiFetch(`${cfg.url}/api/agent/ping`, 'POST', { cwd: process.cwd() }, cfg.token)
+      if (res.ok) {
+        saveConfig(cfg)
+        console.log('\n✅ Connected! Config saved.\n')
+      } else {
+        console.error('❌ Connection failed. Check URL and token.')
+        process.exit(1)
+      }
+    } catch (e) {
+      console.error(`❌ Connection error: ${e.message}`)
+      process.exit(1)
+    }
+    return mainLoop(cfg)
+  }
+
   if (!cfg) {
     console.log('🧠 MyMemGuard Agent Setup\n')
     const url = await ask('MyMemGuardのURL (例: https://mymemguard.vercel.app): ')
